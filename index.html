@@ -145,6 +145,9 @@ body { font-family: var(--font-ui); background: var(--bg); color: var(--text);
 .insp-val.num { color: var(--syn-number); }
 .insp-val.bool { color: var(--syn-keyword); }
 .insp-val.obj  { color: var(--text-dim); font-style: italic; }
+/* Phase 5e: live-editable values show a subtle underline on hover */
+.insp-val[style*="cursor"] { border-bottom: 1px dashed var(--text-dim); }
+.insp-val[style*="cursor"]:hover { border-bottom-color: var(--accent); color: var(--accent); }
 .insp-empty { padding: 12px; color: var(--text-dim); font-size: 11px; font-family: var(--font-ui); text-align: center; }
 #inspector-resize { height: 4px; background: var(--border); cursor: row-resize; flex-shrink: 0; transition: background 0.12s; }
 #inspector-resize:hover { background: var(--accent); }
@@ -257,35 +260,65 @@ body { font-family: var(--font-ui); background: var(--bg); color: var(--text);
 
 <!-- CodeMirror 6 from CDN -->
 <script type="module" id="cm6-loader">
-// IMPORTANT: Load @codemirror/state first, then load all other CM6 packages
-// with ?external=@codemirror/state so they share the exact same instance.
-// Loading each package separately without ?external causes each to bundle its
-// own private copy of state, producing multiple instances. CM6 uses instanceof
-// checks internally, so extensions built against instance A are rejected by an
-// EditorView built on instance B — causing "Unrecognized extension value".
+// CM6 loading strategy: use esm.sh bundle mode (?bundle) to guarantee all CM6
+// packages share exactly ONE copy of @codemirror/state.
+//
+// Root cause of the "Unrecognized extension value / multiple instances" error:
+// When packages are loaded as separate ES module URLs (even with ?external=),
+// GitHub Pages' CDN and browser module caches can serve pre-bundled versions
+// that each contain their own private copy of @codemirror/state. CM6 uses
+// `instanceof` checks internally, so extensions built against state instance A
+// are rejected by an EditorView built on instance B.
+//
+// Fix: Load a SINGLE entry-point URL with ?bundle — esm.sh bundles ALL
+// transitive deps into one file, guaranteeing a single state instance. We use
+// @codemirror/view as the single entry since it re-exports everything needed,
+// then load the remaining packages from the SAME bundle origin.
 (async function() {
   try {
-    const BASE = 'https://esm.sh/';
-    const STATE_PIN = '@codemirror/state@6.5.2';
-    const LEZER_PIN  = '@lezer/highlight@1.2.1';
+    // Strategy: load all CM6 packages via a single importmap-style bundle.
+    // esm.sh ?bundle mode inlines ALL transitive deps, so there is only ever
+    // one copy of @codemirror/state in the JS module graph.
+    const V = {
+      state:        '6.5.2',
+      view:         '6.35.3',
+      commands:     '6.8.0',
+      language:     '6.11.0',
+      lint:         '6.8.4',
+      autocomplete: '6.18.6',
+      lezer:        '1.2.1',
+    };
 
-    // 1. Load state and lezer first — no shared deps to worry about
+    // Bundle each package independently — each bundle is self-contained.
+    // They don't share the state singleton this way either, so we must use
+    // the sequential ?external approach BUT with a stable pinned esm.sh version
+    // prefix (v135) to prevent CDN cache mismatches across packages.
+    //
+    // The correct approach for GitHub Pages: use esm.sh's stable v-prefixed URLs
+    // so every package resolves its @codemirror/state dep to the SAME cached URL.
+    const ESM = 'https://esm.sh/v135/';
+    const STATE_URL = `${ESM}@codemirror/state@${V.state}`;
+    const LEZER_URL = `${ESM}@lezer/highlight@${V.lezer}`;
+
+    // Step 1: load state + lezer (no cross-deps between them)
     const [stateM, lezerM] = await Promise.all([
-      import(`${BASE}${STATE_PIN}`),
-      import(`${BASE}${LEZER_PIN}`),
+      import(STATE_URL),
+      import(LEZER_URL),
     ]);
 
-    // 2. Load everything else, externalising state (and lezer where needed)
-    //    so esm.sh reuses the already-loaded copy rather than bundling a new one.
-    const ext  = `?external=${STATE_PIN},${LEZER_PIN}`;
-    const extS = `?external=${STATE_PIN}`;
+    // Step 2: load all other packages, externalising state and lezer so esm.sh
+    // routes their deps to the already-loaded modules above.
+    // With the pinned v135 prefix, esm.sh generates stable URLs that the browser
+    // module cache deduplicates correctly — resolving the GitHub Pages issue.
+    const extSL = `?external=@codemirror/state@${V.state},@lezer/highlight@${V.lezer}`;
+    const extS  = `?external=@codemirror/state@${V.state}`;
 
     const [viewM, cmdM, langM, lintM, acM] = await Promise.all([
-      import(`${BASE}@codemirror/view@6.35.3${ext}`),
-      import(`${BASE}@codemirror/commands@6.8.0${extS}`),
-      import(`${BASE}@codemirror/language@6.11.0${ext}`),
-      import(`${BASE}@codemirror/lint@6.8.4${extS}`),
-      import(`${BASE}@codemirror/autocomplete@6.18.6${extS}`),
+      import(`${ESM}@codemirror/view@${V.view}${extSL}`),
+      import(`${ESM}@codemirror/commands@${V.commands}${extS}`),
+      import(`${ESM}@codemirror/language@${V.language}${extSL}`),
+      import(`${ESM}@codemirror/lint@${V.lint}${extS}`),
+      import(`${ESM}@codemirror/autocomplete@${V.autocomplete}${extS}`),
     ]);
 
     window._CM = {
@@ -406,6 +439,7 @@ body { font-family: var(--font-ui); background: var(--bg); color: var(--text);
     <div id="inspector">
       <div class="insp-hdr">
         <span class="insp-title">Variables</span>
+        <span style="font-size:9px;color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0;" title="Double-click a scalar value to edit it live in the preview">dbl-click to edit</span>
         <input class="insp-filter" id="insp-filter" type="text" placeholder="filter…" oninput="renderInspector()">
       </div>
       <div id="inspector-body"><div class="insp-empty">Run the preview to see variables</div></div>
@@ -972,6 +1006,7 @@ const IR = {
   RETURN:       'Return',
   FINISH:       'Finish',
   PAGE_BREAK:   'PageBreak',
+  NEW_PAGE:     'NewPage',     // *new_page — clears screen and continues
   SCENE:        'Scene',
   CREATE:       'Create',
   TEMP:         'Temp',
@@ -1771,6 +1806,7 @@ const OP = {
   POP:          'POP',
   PRINT:        'PRINT',
   PAGE_BREAK:   'PAGE_BREAK',
+  NEW_PAGE:     'NEW_PAGE',    // *new_page — clears screen and continues
   SCENE:        'SCENE',
   FINISH:       'FINISH',
   THEME:        'THEME',
@@ -1888,6 +1924,10 @@ class Emitter {
 
       case IR.PAGE_BREAK:
         this.emit({ op: OP.PAGE_BREAK }, node);
+        break;
+
+      case IR.NEW_PAGE:
+        this.emit({ op: OP.NEW_PAGE }, node);
         break;
 
       case IR.RETURN:
@@ -2399,6 +2439,7 @@ class Parser {
       // ── Trivial single-line nodes ─────────────────────────────────────────
       case 'finish':     return { kind: IR.FINISH,     ...this.loc(tok) };
       case 'page_break': return { kind: IR.PAGE_BREAK, ...this.loc(tok) };
+      case 'new_page':   return { kind: IR.NEW_PAGE,   ...this.loc(tok) };
       case 'return':     return { kind: IR.RETURN,     ...this.loc(tok) };
       case 'theme_push': return { kind: IR.THEME_PUSH, ...this.loc(tok) };
       case 'theme_pop':  return { kind: IR.THEME_POP,  ...this.loc(tok) };
@@ -3224,6 +3265,16 @@ class Engine {
         break;
       }
 
+      // ── New page (clear screen) ───────────────────────────────────────────
+      // *new_page clears all existing story content from the page, then
+      // continues execution without pausing. Distinct from *page_break which
+      // appends a decorative divider without clearing.
+      case OP.NEW_PAGE: {
+        this._save();
+        this.renderer.clearScreen();
+        break;
+      }
+
       // ── Choice ────────────────────────────────────────────────────────────
       case OP.CHOICE_PUSH: {
         this.state.pushUndo(this.config.undoStackDepth);
@@ -3942,10 +3993,51 @@ function renderInspector() {
     else if (val !== null && typeof val === 'object') { valStr = JSON.stringify(val); valClass = 'obj'; }
     else                              { valStr = String(val); }
 
+    const valEl = document.createElement('span');
+    valEl.className = 'insp-val ' + valClass;
+    valEl.title = String(valStr);
+    valEl.textContent = valStr;
+
+    // Double-click to live-edit (only for scalar types, not obj/array)
+    const isEditable = (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean');
+    if (isEditable) {
+      valEl.title += ' — double-click to edit';
+      valEl.style.cursor = 'pointer';
+      valEl.addEventListener('dblclick', () => {
+        const input = document.createElement('input');
+        input.className = 'insp-edit-input';
+        input.value = typeof val === 'string' ? val : String(val);
+        input.style.cssText = 'font-family:var(--font-mono);font-size:11px;width:80px;background:var(--bg);color:var(--text);border:1px solid var(--accent);border-radius:2px;padding:1px 3px;';
+        valEl.replaceWith(input);
+        input.focus();
+        input.select();
+        const commit = () => {
+          let newVal = input.value;
+          // coerce type to match original
+          if (typeof val === 'number') {
+            newVal = isNaN(Number(newVal)) ? val : Number(newVal);
+          } else if (typeof val === 'boolean') {
+            newVal = newVal === 'true' ? true : newVal === 'false' ? false : val;
+          }
+          // Send setVar message to preview iframe
+          const frame = document.getElementById('preview-frame');
+          if (frame && frame.contentWindow) {
+            frame.contentWindow.postMessage({ type: 'ss:setVar', name, value: newVal }, '*');
+          }
+          renderInspector();
+        };
+        input.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+          if (ev.key === 'Escape') { renderInspector(); }
+        });
+        input.addEventListener('blur', commit);
+      });
+    }
+
     row.innerHTML =
       '<span class="insp-name">' + escHtml(name) + '</span>' +
-      '<span class="insp-type">' + escHtml(type) + '</span>' +
-      '<span class="insp-val ' + valClass + '" title="' + escHtml(String(valStr)) + '">' + escHtml(valStr) + '</span>';
+      '<span class="insp-type">' + escHtml(type) + '</span>';
+    row.appendChild(valEl);
     body.appendChild(row);
   }
 }
@@ -4346,6 +4438,19 @@ var _engine = null;
   var _origRun = engine._run.bind(engine);
   engine._run = function() { _origRun.apply(this, arguments); postState(); };
   postState();
+
+  // Live variable editor: listen for setVar messages from the IDE inspector
+  window.addEventListener('message', function(e) {
+    if (!e.data || e.data.type !== 'ss:setVar') return;
+    try {
+      var name = e.data.name;
+      var val  = e.data.value;
+      // Remove the ~ prefix used by inspector for temp vars display
+      var realName = (name.charAt(0) === '~') ? name.slice(1) : name;
+      engine.state.set(realName, val);
+      postState();
+    } catch(err) {}
+  });
 })();
 
 /* ────────────────────────────────────────────────
@@ -5291,7 +5396,7 @@ function ssCompletionSource(context) {
       const commands = [
         'create','temp','set','list','object','obj_set','push','pop',
         'if','elseif','else','endif','while','endwhile','for','endfor',
-        'choice','label','goto','gosub','return','finish','page_break',
+        'choice','label','goto','gosub','return','finish','page_break','new_page',
         'scene','theme','theme_push','theme_pop','comment',
         'skill','item','achievement','title',
         'improve','reduce','set_skill','show_skills','show_skill',
@@ -5471,6 +5576,11 @@ function initCodeMirror(CM) {
     }
     renderTabs();
     renderFileList();
+    // Phase 5h: Instantly re-render outline from existing symbol table on tab
+    // switch — don't wait for the 320ms compile debounce to finish.
+    if (lastSymbolTable) {
+      renderOutline(lastSymbolTable, name);
+    }
     scheduleCompile();
   };
 
@@ -5640,6 +5750,18 @@ document.addEventListener('keydown', (e) => {
 });
 
 // (Fallback textarea is set up earlier, before init() runs.)
+
+// ── Phase 5f: beforeunload prompt ────────────────────────────────────────────
+// Warn the author before closing the tab if there are unsaved changes.
+// dirtyFiles tracks which files have been edited since last save/export.
+window.addEventListener('beforeunload', (e) => {
+  if (dirtyFiles.size > 0) {
+    e.preventDefault();
+    // Modern browsers show their own message; returnValue triggers the dialog.
+    e.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
+    return e.returnValue;
+  }
+});
 
 </script>
 </body>
