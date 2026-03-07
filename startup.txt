@@ -1,0 +1,332 @@
+*comment ─────────────────────────────────────────────────
+*comment  THE LANTERN ROAD
+*comment  A short demo story for the StoryScript Engine.
+*comment ─────────────────────────────────────────────────
+
+*create name "traveller"
+*create lanterns 3
+*create courage 50
+*create coin 10
+*create has_map false
+*create has_lantern true
+*list inventory ["worn boots", "water flask"]
+*object player {"hp": 100, "maxhp": 100}
+
+*theme {"--bg": "#f0e6cc", "--text": "#1c1a14", "--choice-bg": "#e8dab8", "--choice-border": "#8a7145", "--accent": "#5c3d0e"}
+
+You wake on a cold road with no memory of how you arrived here.
+
+The lanterns lining the path ahead flicker. Somewhere in the dark, something breathes.
+
+You reach into your coat. You have ${lanterns} lanterns left.
+
+*page_break
+
+*choice
+	#Call out into the dark
+		You cup your hands. "Hello?"
+		
+		The breathing stops.
+		
+		Then — footsteps, slow and deliberate, approaching from the tree line.
+		
+		A figure resolves out of the fog: an old woman in a travelling cloak, a lantern swinging from one fist.
+		
+		"I thought you were a ghost," she says. "You look like one."
+		
+		*gosub meet_elder
+	#Hold perfectly still
+		You press yourself against a stone wall and wait.
+		
+		The breathing fades. Whatever was out there moves on.
+		
+		After a long minute, your heartbeat settles.
+		
+		*set courage courage + 5
+		
+		You notice a folded paper on the ground nearby. A map, half-ruined by damp.
+		
+		*set has_map true
+		*push inventory "damp map"
+		
+		You study it as best you can. There is a village, two miles east.
+		
+		*goto road_to_village
+	#Run
+		*set courage courage - 15
+		
+		You run blind, boots sliding on wet stone, until your lungs give out.
+		
+		When you stop, gasping, you are at a crossroads you do not recognise.
+		
+		*set lanterns lanterns - 1
+		
+		You burned through a lantern in the panic. ${lanterns} remain.
+		
+		*goto crossroads
+
+*label meet_elder
+
+The old woman — she gives her name as Maren — is matter-of-fact about everything.
+
+"The road ahead is watched," she says. "Toll-keepers. Not the official kind."
+
+She studies you. "You look like you've got nothing to lose. That's either brave or stupid."
+
+*page_break
+
+*choice
+	#"I have ${coin} coin. Is that enough to pass?"
+		Maren squints. "For one person, and if you don't linger, maybe."
+		
+		She takes one coin from you and tucks it away. "Call it advice money."
+		
+		*set coin coin - 1
+		
+		"The toll-keepers want three coin each. You've got enough — just barely. Don't spend it."
+		
+		*set courage courage + 10
+		*goto road_to_village
+	#"I'll go around them."
+		"Through the Briar?" Maren looks unimpressed. "You'll lose an eye."
+		
+		She sighs and reaches into her pack. "Here. You'll want this."
+		
+		She hands you a folded map.
+		
+		*set has_map true
+		*push inventory "Maren's map"
+		
+		"The Briar path adds two hours. But no toll-keepers."
+		
+		*goto briar_path
+	#"What's in it for you?"
+		Maren smiles. It does not reach her eyes.
+		
+		"I like to see who makes it through. Consider me curious."
+		
+		She gives you nothing further — but she does step aside and let you pass without trouble.
+		
+		*set courage courage %+ 20
+		
+		*goto road_to_village
+
+*label briar_path
+
+The Briar is exactly as unpleasant as advertised.
+
+*gosub spend_lantern
+
+Thorns drag at your coat. The path loops back on itself twice before straightening.
+
+*if has_map
+	Your map — such as it is — keeps you oriented. You pick the correct fork without losing much time.
+*else
+	Without a map you guess at every fork. You guess wrong twice. You're tired and scratched when you finally emerge.
+	*set courage courage - 10
+*endif
+
+*page_break
+
+You come out on the far side of the Briar onto a moonlit road. Ahead: lights. A village.
+
+*goto village_gates
+
+*label road_to_village
+
+The road is straight and flat and watched.
+
+Two figures stand at a makeshift gate across the road. One holds a lantern. One holds a club.
+
+"Three coin," says the one with the club. "Each way. You look like a one-way kind of traveller, so three coin."
+
+*page_break
+
+*if coin >= 3
+	*choice
+		#Pay the toll
+			*set coin coin - 3
+			
+			The gate swings open. The one with the lantern nods, as if you've passed some kind of test.
+			
+			"Smart," he says. "Some people fight us. They don't reach the village."
+			
+			*goto village_gates
+		#[if courage >= 60] Stare them down
+			You hold the toll-keeper's gaze for a long, cold moment.
+			
+			Something in your expression gives him pause. He looks at his partner. His partner looks at the ground.
+			
+			"...go on then," he mutters, and opens the gate.
+			
+			*set courage courage + 15
+			
+			*goto village_gates
+		#Double back through the Briar
+			You weigh your coin. You weigh the dark.
+			
+			You turn around.
+			
+			*goto briar_path
+*else
+	You don't have enough coin. The toll-keeper can see it on your face.
+	
+	"Briar or back the way you came," he says. "Your choice."
+	
+	*choice
+		#Into the Briar
+			*goto briar_path
+		#Back the way you came
+			*set courage courage - 10
+			*goto crossroads
+*endif
+
+*label crossroads
+
+You are at the crossroads. Three roads. No signage.
+
+You have ${lanterns} lanterns. You have ${coin} coin.
+
+*if has_map
+	You check the map. East is the village. West leads back toward wherever you came from. North is unmarked.
+*else
+	You have no map. You guess.
+*endif
+
+*page_break
+
+*choice
+	#Go east
+		*goto road_to_village
+	#Go north
+		*set lanterns lanterns - 1
+		
+		The north road climbs. The fog thickens. After an hour you find a ruined waystation.
+		
+		Inside: a locked chest, a dead fire, and scratched into the wall: TURN BACK.
+		
+		*set courage courage - 5
+		
+		*if lanterns = 0
+			Your last lantern goes out in a gust through the broken roof.
+			
+			You sit in the dark for a very long time.
+			
+			Eventually you turn back, feeling your way by touch.
+			
+			*set courage courage - 15
+		*endif
+		
+		*goto crossroads
+	#Go west
+		The west road is familiar in an unsettling way — as if you've walked it in a dream.
+		
+		You walk for an hour and arrive back where you started.
+		
+		You have learned nothing. You have ${coin} coin and ${lanterns} lanterns.
+		
+		*goto crossroads
+
+*label village_gates
+
+*theme {"--bg": "#ede0c0", "--accent": "#3d6b3a", "--choice-border": "#5a8a56"}
+
+The village is real.
+
+Warm light leaks under doors. Smoke rises from chimneys. A dog barks once and goes quiet.
+
+You count your inventory as you walk the main street.
+
+*temp item_count 0
+*for item in inventory
+	*set item_count item_count + 1
+*endfor
+
+You're carrying ${item_count} item(s):
+
+*for item in inventory
+	— ${item}
+*endfor
+
+*page_break
+
+An inn sits at the end of the street, its sign a painted lantern. Inside: firelight and voices.
+
+*choice
+	#Go inside
+		The innkeeper is a broad-shouldered person with a grey braid and a look of professional welcome.
+		
+		"Travelling alone?" they ask. "Road's been strange tonight. You're the third one through."
+		
+		*if coin >= 2
+			*set coin coin - 2
+			"A room and a meal — two coin. You look like you need both."
+			
+			You eat. You sleep. In the morning, the road looks possible again.
+			
+			*goto ending_rested
+		*else
+			"A room's two coin," they say. "Meal's included."
+			
+			You show them your purse.
+			
+			They look at it for a moment. "Fireplace is free. I won't charge you for the chair."
+			
+			*goto ending_chair
+		*endif
+	#Keep walking
+		You don't know what you're looking for.
+		
+		But the village falls behind you, and the road opens up, and for the first time tonight the sky is clear.
+		
+		*goto ending_road
+
+*label ending_rested
+
+*theme {"--bg": "#e8eed8", "--accent": "#3a6632", "--choice-border": "#5a8a50"}
+
+You sleep without dreaming, which is the best kind of sleep.
+
+In the morning you find a note slipped under your door. No signature. Just an address, three towns east, and one word: come.
+
+Your courage is ${courage}. Your coin is ${coin}.
+
+You have survived the Lantern Road.
+
+*finish
+
+*label ending_chair
+
+*theme {"--bg": "#e8eed8", "--accent": "#3a6632", "--choice-border": "#5a8a50"}
+
+The fire is warm enough. The chair is harder than a bed, but you've slept in worse.
+
+At some point in the night the innkeeper drapes a blanket over you without waking you.
+
+Your courage is ${courage}. Your coin is ${coin}.
+
+You have survived the Lantern Road.
+
+*finish
+
+*label ending_road
+
+*theme {"--bg": "#f0e6cc", "--accent": "#5c3d0e", "--choice-border": "#8a7145"}
+
+The road goes on. The lanterns are running low. You don't stop.
+
+Somewhere behind you, the village light fades.
+
+Somewhere ahead, the sky begins to pale.
+
+Your courage is ${courage}. Your coin is ${coin}.
+
+You have survived the Lantern Road.
+
+*finish
+
+*label spend_lantern
+*if lanterns > 0
+	*set lanterns lanterns - 1
+*endif
+*return

@@ -1,0 +1,9 @@
+{
+  "title": "The Lantern Road",
+  "version": "0.1.0",
+  "startScene": "startup.txt",
+  "config": {
+    "loopCap": 100000,
+    "undoStackDepth": 50
+  }
+}

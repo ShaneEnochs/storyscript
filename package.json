@@ -1,0 +1,28 @@
+{
+  "name": "storyscript",
+  "version": "0.4.0",
+  "description": "StoryScript interactive fiction engine and IDE",
+  "main": "src/compiler.js",
+  "exports": {
+    ".":             "./src/compiler.js",
+    "./compiler":    "./src/compiler.js",
+    "./lexer":       "./src/lexer.js",
+    "./parser":      "./src/parser.js",
+    "./emitter":     "./src/emitter.js",
+    "./ir":          "./src/ir.js",
+    "./engine":      "./src/engine.js",
+    "./renderer":    "./src/renderer.js",
+    "./state":       "./src/state.js",
+    "./evaluator":   "./src/evaluator.js"
+  },
+  "scripts": {
+    "test":  "node test/run_tests.js && node test/phase1_tests.js",
+    "fuzz":  "node fuzz.js --runs 100",
+    "lint":  "node lint.js",
+    "build": "node build.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT"
+}
