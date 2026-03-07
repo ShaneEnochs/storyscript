@@ -919,6 +919,16 @@ class Parser {
         if (!this.state) throw new EvalError('has_title() requires runtime state', this.src);
         return this.state.grantedTitles?.has(String(args[0])) ?? false;
       }
+      case 'discovered': {
+        if (args.length !== 1) throw new EvalError('discovered() requires 1 argument (clue id)', this.src);
+        if (!this.state) throw new EvalError('discovered() requires runtime state', this.src);
+        return this.state.discoveredClues?.has(String(args[0])) ?? false;
+      }
+      case 'resolved': {
+        if (args.length !== 1) throw new EvalError('resolved() requires 1 argument (clue id)', this.src);
+        if (!this.state) throw new EvalError('resolved() requires runtime state', this.src);
+        return this.state.resolvedClues?.has(String(args[0])) ?? false;
+      }
       default:
         throw new EvalError(`Unknown built-in function: ${name}()`, this.src);
     }
@@ -980,13 +990,17 @@ SS._ir = (function() {
  * re-parsing bytecode.
  *
  * IR node kinds:
- *   Text, Blank, Label, Goto, Gosub, Return, Finish, PageBreak, Scene,
+ *   Text, Blank, Label, Goto, Gosub, Return, Finish, PageBreak, NewPage, Scene,
  *   Create, Temp, Set, ListCreate, ObjCreate, ObjSet, Push, Pop,
  *   Theme, ThemePush, ThemePop, Comment,
  *   If { condition, consequent[], elseifClauses[], alternate[] },
  *   While { condition, body[] },
  *   For { var, list, body[] },
- *   Choice { options: [{ text, cond, body[] }] }
+ *   Choice { options: [{ text, cond, body[] }] },
+ *   Check { skillId, difficulty, successBody[], failureBody[] },
+ *   Once { id, body[] },
+ *   Switch { expr, cases: [{value, body[]}], defaultBody[] },
+ *   Chapter { title, icon }, Flag { id }, Raise { id }, Lower { id }
  *
  * Bytecode version — bump when the bytecode format changes in a
  * backward-incompatible way so saved games / pre-compiled exports can
@@ -1043,6 +1057,29 @@ const IR = {
   SHOW_ACHIEVEMENTS: 'ShowAchievements', // *show_achievements
   SHOW_TITLE:   'ShowTitle',    // *show_title
   SHOW_INVENTORY: 'ShowInventory', // *show_inventory
+  // Phase 5c
+  CHECK:        'Check',        // *check skillId [difficulty=N] ... *success ... *failure ... *endcheck
+  // Phase 5g
+  CHAPTER:      'Chapter',      // *chapter "Title" [icon="emoji"] — structural metadata, no runtime effect
+  // Phase 6a
+  FLAG:         'Flag',         // *flag id — declare a boolean flag global (startup only)
+  RAISE:        'Raise',        // *raise id — set flag/var to true
+  LOWER:        'Lower',        // *lower id — set flag/var to false
+  // Phase 6b
+  ONCE:         'Once',         // *once id ... *endonce — execute body only once per save
+  // Phase 6c
+  SWITCH:       'Switch',       // *switch expr *case v ... *default ... *endswitch
+  // Phase 6d
+  DELAY:        'Delay',        // *delay N — pause rendering for N seconds
+  // Phase 6e
+  NPC:          'Npc',          // *npc id {"name":"...","color":"..."} — declare NPC
+  DIALOGUE:     'Dialogue',     // *dialogue npcId [mood="..."] ... *enddialogue
+  // Phase 6f
+  CLUE:         'Clue',         // *clue id {"title":"...","text":"...","category":"..."} — declare clue
+  DISCOVER:     'Discover',     // *discover id — add clue to journal
+  RESOLVE:      'Resolve',      // *resolve id — mark clue as resolved
+  // Phase 6g
+  TRANSITION:   'Transition',   // *transition preset [duration=N] — pending scene transition
 };
 
 // ─── SymbolTable ──────────────────────────────────────────────────────────────
@@ -1086,6 +1123,18 @@ class SymbolTable {
     this.usedItems = new Set();
     /** @type {Set<string>} skill IDs that are improved/reduced somewhere */
     this.usedSkills = new Set();
+
+    // Phase 5/6
+    /** @type {Map<string, {file: string, lineNum: number, title: string, icon: string|null}>} */
+    this.chapters = new Map();
+    /** @type {Set<string>} flag IDs declared with *flag */
+    this.flags = new Set();
+    // Phase 6e
+    /** @type {Map<string, {file: string, lineNum: number, schema: object}>} */
+    this.npcs = new Map();
+    // Phase 6f
+    /** @type {Map<string, {file: string, lineNum: number, schema: object}>} */
+    this.clues = new Map();
   }
 
   /**
@@ -1164,6 +1213,44 @@ class SymbolTable {
         this.usedSkills.add(node.id);
         break;
 
+      // Phase 5/6 block recursion
+      case IR.CHECK:
+        this._walk(node.successBody, file);
+        this._walk(node.failureBody, file);
+        break;
+
+      case IR.ONCE:
+        this._walk(node.body, file);
+        break;
+
+      case IR.SWITCH:
+        for (const c of node.cases) this._walk(c.body, file);
+        if (node.defaultBody) this._walk(node.defaultBody, file);
+        break;
+
+      case IR.CHAPTER:
+        this.chapters.set(node.title, { file, lineNum: node.lineNum, title: node.title, icon: node.icon });
+        break;
+
+      case IR.FLAG:
+        this.flags.add(node.id);
+        break;
+
+      // Phase 6e: NPC
+      case IR.NPC:
+        this.npcs.set(node.id, { file, lineNum: node.lineNum, schema: node.schema });
+        break;
+
+      // Phase 6e: Dialogue recurse
+      case IR.DIALOGUE:
+        this._walk(node.body, file);
+        break;
+
+      // Phase 6f: Clue
+      case IR.CLUE:
+        this.clues.set(node.id, { file, lineNum: node.lineNum, schema: node.schema });
+        break;
+
       // Recurse into block nodes
       case IR.IF:
         this._walk(node.consequent, file);
@@ -1212,7 +1299,7 @@ SS._state = (function() {
  * Serializable to/from plain JSON for save/load.
  */
 
-const SAVE_VERSION = 2; // Phase 3: added inventory, skillMeta, achievements, titles
+const SAVE_VERSION = 4; // Phase 6: added npcRegistry, clueRegistry, discoveredClues, resolvedClues
 
 class StoryState {
   constructor() {
@@ -1234,6 +1321,18 @@ class StoryState {
     this.titleRegistry = new Map(); // titleId → schema
     this.grantedTitles = new Set(); // granted title IDs
     this.activeTitle   = null;     // current highest-rank title id
+
+    // Phase 5/6 additions
+    this.seenOnce     = new Set(); // IDs of *once blocks already executed
+    this.flagRegistry = new Set(); // IDs declared with *flag
+    // Phase 6e: NPC registry
+    this.npcRegistry  = new Map(); // npcId → { name, color, ... }
+    // Phase 6f: Clue / journal
+    this.clueRegistry    = new Map(); // clueId → { title, text, category }
+    this.discoveredClues = new Set(); // clue IDs the player has found
+    this.resolvedClues   = new Set(); // clue IDs marked resolved
+    // Phase 6g: Pending transition
+    this.pendingTransition = null; // { preset, duration } | null
   }
 
   // ── Variable access ────────────────────────────────────────────────────────
@@ -1348,6 +1447,12 @@ class StoryState {
       achievements:  [...this.achievements],
       grantedTitles: [...this.grantedTitles],
       activeTitle:   this.activeTitle,
+      seenOnce:      [...this.seenOnce],
+      flagRegistry:  [...this.flagRegistry],
+      npcRegistry:   [...this.npcRegistry],
+      clueRegistry:  [...this.clueRegistry],
+      discoveredClues: [...this.discoveredClues],
+      resolvedClues:   [...this.resolvedClues],
     });
   }
 
@@ -1370,6 +1475,12 @@ class StoryState {
     this.achievements  = new Set(data.achievements ?? []);
     this.grantedTitles = new Set(data.grantedTitles ?? []);
     this.activeTitle   = data.activeTitle ?? null;
+    this.seenOnce      = new Set(data.seenOnce ?? []);
+    this.flagRegistry  = new Set(data.flagRegistry ?? []);
+    this.npcRegistry   = new Map(data.npcRegistry ?? []);
+    this.clueRegistry  = new Map(data.clueRegistry ?? []);
+    this.discoveredClues = new Set(data.discoveredClues ?? []);
+    this.resolvedClues   = new Set(data.resolvedClues ?? []);
     return true;
   }
 }
@@ -1421,6 +1532,8 @@ class DOMRenderer {
 
     this._callbacks = new Map(); // id → callback function
     this._nextId    = 0;
+    this._dialogueContainer = null; // Phase 6e: active dialogue block container
+    this.config     = null; // set externally by Engine if needed
   }
 
   // ── Internal helpers ───────────────────────────────────────────────────────
@@ -1445,11 +1558,11 @@ class DOMRenderer {
   appendText(text) {
     const p = this._createElement('p', { class: 'ss-text' });
     p.textContent = text;
-    this.page.appendChild(p);
+    this._getTextTarget().appendChild(p);
   }
 
   appendBlank() {
-    this.page.appendChild(this._createElement('div', { class: 'ss-blank' }));
+    this._getTextTarget().appendChild(this._createElement('div', { class: 'ss-blank' }));
   }
 
   /**
@@ -1476,6 +1589,7 @@ class DOMRenderer {
     this.page.innerHTML = '';
     this.ui.innerHTML   = '';
     this._callbacks.clear();
+    this._dialogueContainer = null; // Phase 6e: reset dialogue context
   }
 
   renderChoices(options) {
@@ -1664,6 +1778,26 @@ class DOMRenderer {
     this.page.appendChild(panel);
   }
 
+  /**
+   * Show a skill check result card inline in the story.
+   * @param {string} skillId   - the skill being checked
+   * @param {number} roll      - the dice roll (1–100)
+   * @param {number} threshold - the success threshold
+   * @param {boolean} success  - whether the roll succeeded
+   */
+  showCheckResult(skillId, roll, threshold, success) {
+    const card = this._createElement('div', { class: `ss-check-card ${success ? 'ss-check-success' : 'ss-check-failure'}` });
+    const icon  = this._createElement('span', { class: 'ss-check-icon' }, success ? '✦' : '✕');
+    const label = this._createElement('span', { class: 'ss-check-label' });
+    label.textContent = `${skillId.toUpperCase()} CHECK`;
+    const detail = this._createElement('span', { class: 'ss-check-detail' });
+    detail.textContent = `Rolled ${roll} vs ${threshold} — ${success ? 'SUCCESS' : 'FAILURE'}`;
+    card.appendChild(icon);
+    card.appendChild(label);
+    card.appendChild(detail);
+    this.page.appendChild(card);
+  }
+
   showError(message) {
     const el = this._createElement('div', { class: 'ss-error' });
     el.textContent = message;
@@ -1689,6 +1823,68 @@ class DOMRenderer {
       if (prop.startsWith('--')) snapshot[prop] = style.getPropertyValue(prop);
     }
     return snapshot;
+  }
+
+  // ── Phase 6e: Dialogue ────────────────────────────────────────────────────
+
+  renderDialogueStart(npc, mood) {
+    const container = this._createElement('div', { class: 'ss-dialogue' });
+    container.style.setProperty('--npc-color', npc.color ?? '#888');
+    const speaker = this._createElement('div', { class: 'ss-dialogue-speaker' });
+    speaker.textContent = npc.name ?? npc.id ?? 'Speaker';
+    if (mood) {
+      const moodEl = this._createElement('span', { class: 'ss-dialogue-mood' });
+      moodEl.textContent = ` (${mood})`;
+      speaker.appendChild(moodEl);
+    }
+    container.appendChild(speaker);
+    this.page.appendChild(container);
+    // Redirect subsequent appendText calls into this container
+    this._dialogueContainer = container;
+  }
+
+  renderDialogueEnd() {
+    this._dialogueContainer = null;
+  }
+
+  // Override appendText to redirect into dialogue container when active
+  _getTextTarget() {
+    return this._dialogueContainer ?? this.page;
+  }
+
+  // ── Phase 6f: Clue discovery toast ────────────────────────────────────────
+
+  renderDiscoverToast(clue) {
+    const toast = this._createElement('div', { class: 'ss-discover-toast' });
+    toast.innerHTML = `<span class="ss-discover-icon">📋</span> <strong>Journal:</strong> ${clue.title ?? clue.id}`;
+    this.page.appendChild(toast);
+    // Fade out after 3 seconds
+    setTimeout(() => { if (toast.parentNode) toast.classList.add('ss-discover-toast-hide'); }, 3000);
+    setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 3600);
+  }
+
+  // ── Phase 6g: Transition ──────────────────────────────────────────────────
+
+  applyTransition(preset, duration, onClear) {
+    const previewSpeedup = this.config?.previewMode ? 2 : 1;
+    const dur = (duration ?? 0.5) / previewSpeedup;
+    const root = this.page.parentElement ?? this.page;
+    root.style.setProperty('--t-dur', `${dur}s`);
+    root.classList.add(`ss-transition-out-${preset}`);
+    const cleanup = () => {
+      root.classList.remove(`ss-transition-out-${preset}`);
+      root.removeEventListener('transitionend', onTransEnd);
+      onClear();
+      // Brief frame for DOM to settle, then fade in
+      requestAnimationFrame(() => {
+        root.classList.add(`ss-transition-in-${preset}`);
+        setTimeout(() => root.classList.remove(`ss-transition-in-${preset}`), dur * 1000 + 50);
+      });
+    };
+    const onTransEnd = () => cleanup();
+    root.addEventListener('transitionend', onTransEnd, { once: true });
+    // Fallback: if transition doesn't fire (e.g., prefers-reduced-motion), run after dur
+    setTimeout(() => { cleanup(); }, dur * 1000 + 200);
   }
 }
 
@@ -1744,6 +1940,7 @@ class NullRenderer {
   renderSkills(skills) {}
   renderAchievements(list) {}
   renderAchievementUnlock(id, schema) {}
+  showCheckResult(skillId, roll, threshold, success) {}
 
   showError(msg) {
     throw new Error(msg);
@@ -1751,6 +1948,12 @@ class NullRenderer {
 
   setTheme()      {}
   snapshotTheme() { return {}; }
+
+  // Phase 6 stubs
+  renderDialogueStart() {}
+  renderDialogueEnd()   {}
+  renderDiscoverToast() {}
+  applyTransition(preset, duration, onClear) { onClear(); } // instant in null renderer
 }
 
 if (typeof module !== 'undefined') {
@@ -1833,6 +2036,29 @@ const OP = {
   SHOW_ACHIEVEMENTS: 'SHOW_ACHIEVEMENTS',
   SHOW_TITLE:   'SHOW_TITLE',
   SHOW_INVENTORY: 'SHOW_INVENTORY',
+  // Phase 5c
+  CHECK_ROLL:   'CHECK_ROLL',   // { skillId, difficulty, failTarget } — rolls dice, jumps to failTarget if fail
+  // Phase 5g
+  CHAPTER:      'CHAPTER',      // { title, icon } — metadata only, no runtime effect
+  // Phase 6a
+  FLAG:         'FLAG',         // { id } — declare boolean flag global
+  RAISE:        'RAISE',        // { id } — set boolean to true
+  LOWER:        'LOWER',        // { id } — set boolean to false
+  // Phase 6b
+  ONCE:         'ONCE',         // { id, skipTarget } — skip body if seen
+  ENDONCE:      'ENDONCE',      // { id } — mark block as seen
+  // Phase 6d
+  DELAY:        'DELAY',        // { seconds } — pause rendering
+  // Phase 6e
+  NPC:          'NPC',          // { id, schema } — register NPC in state
+  DIALOGUE_START: 'DIALOGUE_START', // { npcId, mood } — begin dialogue block
+  DIALOGUE_END: 'DIALOGUE_END', // {} — end dialogue block
+  // Phase 6f
+  CLUE:         'CLUE',         // { id, schema } — register clue
+  DISCOVER:     'DISCOVER',     // { id } — discover a clue
+  RESOLVE:      'RESOLVE',      // { id } — resolve a clue
+  // Phase 6g
+  TRANSITION:   'TRANSITION',   // { preset, duration } — set pending transition
 };
 
 class EmitError {
@@ -2097,6 +2323,73 @@ class Emitter {
         this.emit({ op: OP.SHOW_TITLE }, node);
         break;
 
+      // ── Phase 5c: Check ─────────────────────────────────────────────────────
+      case IR.CHECK:
+        this.emitCheck(node);
+        break;
+
+      // ── Phase 5g: Chapter metadata ──────────────────────────────────────────
+      case IR.CHAPTER:
+        this.emit({ op: OP.CHAPTER, title: node.title, icon: node.icon }, node);
+        break;
+
+      // ── Phase 6a: Flags ─────────────────────────────────────────────────────
+      case IR.FLAG:
+        this.emit({ op: OP.FLAG, id: node.id }, node);
+        break;
+
+      case IR.RAISE:
+        this.emit({ op: OP.RAISE, id: node.id }, node);
+        break;
+
+      case IR.LOWER:
+        this.emit({ op: OP.LOWER, id: node.id }, node);
+        break;
+
+      // ── Phase 6b: Once ──────────────────────────────────────────────────────
+      case IR.ONCE:
+        this.emitOnce(node);
+        break;
+
+      // ── Phase 6c: Switch ────────────────────────────────────────────────────
+      case IR.SWITCH:
+        this.emitSwitch(node);
+        break;
+
+      // ── Phase 6d: Delay ─────────────────────────────────────────────────────
+      case IR.DELAY:
+        this.emit({ op: OP.DELAY, seconds: node.seconds }, node);
+        break;
+
+      // ── Phase 6e: NPC / Dialogue ─────────────────────────────────────────────
+      case IR.NPC:
+        this.emit({ op: OP.NPC, id: node.id, schema: node.schema }, node);
+        break;
+
+      case IR.DIALOGUE:
+        this.emit({ op: OP.DIALOGUE_START, npcId: node.npcId, mood: node.mood }, node);
+        for (const child of node.body) this.emitNode(child);
+        this.emit({ op: OP.DIALOGUE_END }, node);
+        break;
+
+      // ── Phase 6f: Clue / Discover / Resolve ──────────────────────────────────
+      case IR.CLUE:
+        this.emit({ op: OP.CLUE, id: node.id, schema: node.schema }, node);
+        break;
+
+      case IR.DISCOVER:
+        this.emit({ op: OP.DISCOVER, id: node.id }, node);
+        break;
+
+      case IR.RESOLVE:
+        this.emit({ op: OP.RESOLVE, id: node.id }, node);
+        break;
+
+      // ── Phase 6g: Transition ──────────────────────────────────────────────────
+      case IR.TRANSITION:
+        this.emit({ op: OP.TRANSITION, preset: node.preset, duration: node.duration }, node);
+        break;
+
       default:
         this.addError(`Unknown IR node kind: ${node.kind}`, node);
         break;
@@ -2249,6 +2542,121 @@ class Emitter {
       }
       this.program[instrIdx][field] = this.labelTable.get(labelName);
     }
+  }
+
+  // ── Phase 5c: Check emission ──────────────────────────────────────────────
+  // *check skillId [difficulty=N]
+  //   *success
+  //     ... success body ...
+  //   *failure
+  //     ... failure body ...
+  // *endcheck
+  //
+  // Compiles to:
+  //   CHECK_ROLL { skillId, difficulty, failTarget → failLabel }
+  //   ... successBody ...
+  //   ELSE end→endLabel
+  //   failLabel: LABEL
+  //   ... failureBody ...
+  //   endLabel: ENDIF
+
+  emitCheck(node) {
+    const endLabel  = `__check_end_${this._uid()}`;
+    const failLabel = `__check_fail_${this._uid()}`;
+
+    const rollIdx = this.emit({ op: OP.CHECK_ROLL, skillId: node.skillId, difficulty: node.difficulty, failTarget: null }, node);
+    this.patch(rollIdx, 'failTarget', failLabel);
+
+    this.emitNodes(node.successBody);
+
+    const elseIdx = this.emit({ op: OP.ELSE, end: null }, node);
+    this.patch(elseIdx, 'end', endLabel);
+
+    const failIdx = this.emit({ op: OP.LABEL, name: failLabel }, node);
+    this.labelTable.set(failLabel, failIdx);
+
+    this.emitNodes(node.failureBody);
+
+    const endIdx = this.emit({ op: OP.ENDIF }, node);
+    this.labelTable.set(endLabel, endIdx);
+  }
+
+  // ── Phase 6b: Once emission ────────────────────────────────────────────────
+  // Compiles to:
+  //   ONCE { id, skipTarget → skipLabel }
+  //   ... body ...
+  //   ENDONCE { id }
+  //   skipLabel: LABEL
+
+  emitOnce(node) {
+    const skipLabel = `__once_skip_${this._uid()}`;
+
+    const onceIdx = this.emit({ op: OP.ONCE, id: node.id, skipTarget: null }, node);
+    this.patch(onceIdx, 'skipTarget', skipLabel);
+
+    this.emitNodes(node.body);
+
+    this.emit({ op: OP.ENDONCE, id: node.id }, node);
+
+    const skipIdx = this.emit({ op: OP.LABEL, name: skipLabel }, node);
+    this.labelTable.set(skipLabel, skipIdx);
+  }
+
+  // ── Phase 6c: Switch emission ──────────────────────────────────────────────
+  // Evaluates expr once into a temp var, then chains IF comparisons.
+  //
+  // *switch expr        →  SET_TEMP __sw_N expr
+  //   *case "a"         →  IF __sw_N = "a" else→nextLabel
+  //     body            →    body
+  //   *case "b"         →  ELSE end→endLabel  nextLabel: IF __sw_N = "b" ...
+  //   *default          →  defaultLabel: body
+  // *endswitch          →  endLabel: ENDIF
+
+  emitSwitch(node) {
+    const tmpVar   = `__sw_${this._uid()}`;
+    const endLabel = `__sw_end_${this._uid()}`;
+
+    this.emit({ op: OP.SET_TEMP, var: tmpVar, expr: node.expr }, node);
+
+    const caseNextLabels = node.cases.map(() => `__sw_next_${this._uid()}`);
+    const defLabel = node.defaultBody !== null ? `__sw_default_${this._uid()}` : endLabel;
+
+    for (let i = 0; i < node.cases.length; i++) {
+      const c = node.cases[i];
+
+      // Build comparison expression: tmpVar = value
+      let valStr;
+      if (typeof c.value === 'string')       valStr = `"${c.value}"`;
+      else if (typeof c.value === 'boolean') valStr = c.value ? 'true' : 'false';
+      else                                   valStr = String(c.value);
+      const cmpExpr = `${tmpVar} = ${valStr}`;
+
+      const nextTarget = i + 1 < node.cases.length ? caseNextLabels[i + 1] : defLabel;
+
+      const ifIdx = this.emit({ op: OP.IF, expr: cmpExpr, else: null }, node);
+      this.patch(ifIdx, 'else', nextTarget);
+
+      this.emitNodes(c.body);
+
+      const elseIdx = this.emit({ op: OP.ELSE, end: null }, node);
+      this.patch(elseIdx, 'end', endLabel);
+
+      if (i + 1 < node.cases.length) {
+        const nextIdx = this.emit({ op: OP.LABEL, name: caseNextLabels[i + 1] }, node);
+        this.labelTable.set(caseNextLabels[i + 1], nextIdx);
+      }
+    }
+
+    if (node.defaultBody !== null) {
+      if (node.cases.length > 0) {
+        const defIdx = this.emit({ op: OP.LABEL, name: defLabel }, node);
+        this.labelTable.set(defLabel, defIdx);
+      }
+      this.emitNodes(node.defaultBody);
+    }
+
+    const endIdx = this.emit({ op: OP.ENDIF }, node);
+    this.labelTable.set(endLabel, endIdx);
   }
 
   // ── UID generator ─────────────────────────────────────────────────────────
@@ -2412,7 +2820,8 @@ class Parser {
 
       if (tok.type === 'text') {
         this.consume();
-        nodes.push({ kind: IR.TEXT, value: tok.payload, ...this.loc(tok) });
+        // Phase 5d: inline [if ...][else][endif] in text lines
+        for (const n of this.parseInlineConditionals(tok)) nodes.push(n);
         continue;
       }
 
@@ -2690,6 +3099,38 @@ class Parser {
       case 'while':   return this.parseWhile(tok, rest);
       case 'for':     return this.parseFor(tok, rest);
       case 'choice':  return this.parseChoice(tok);
+      case 'check':   return this.parseCheck(tok, rest);
+      case 'once':    return this.parseOnce(tok, rest);
+      case 'switch':  return this.parseSwitch(tok, rest);
+
+      // ── Phase 5g: Chapter metadata ────────────────────────────────────────
+      case 'chapter': {
+        const m = rest.trim().match(/^"([^"]*)"(?:\s+icon="([^"]*)")?$/);
+        if (!m) { this.addError('*chapter: expected *chapter "Title" [icon="emoji"]', tok); return null; }
+        return { kind: IR.CHAPTER, title: m[1], icon: m[2] ?? null, ...this.loc(tok) };
+      }
+
+      // ── Phase 6a: Flag system ─────────────────────────────────────────────
+      case 'flag': {
+        const id = rest.trim();
+        if (!id || !/^\w+$/.test(id)) { this.addError('*flag requires a valid identifier', tok); return null; }
+        if (this.file !== this.startupFile) {
+          this.addError(`*flag '${id}' must be declared in ${this.startupFile}`, tok); return null;
+        }
+        return { kind: IR.FLAG, id, ...this.loc(tok) };
+      }
+
+      case 'raise': {
+        const id = rest.trim();
+        if (!id) { this.addError('*raise requires a flag id', tok); return null; }
+        return { kind: IR.RAISE, id, ...this.loc(tok) };
+      }
+
+      case 'lower': {
+        const id = rest.trim();
+        if (!id) { this.addError('*lower requires a flag id', tok); return null; }
+        return { kind: IR.LOWER, id, ...this.loc(tok) };
+      }
 
       // ── Unexpected terminators ────────────────────────────────────────────
       case 'elseif':
@@ -2705,6 +3146,89 @@ class Parser {
       case 'endfor':
         this.addError('*endfor without matching *for', tok);
         return null;
+
+      case 'endcheck':
+        this.addError('*endcheck without matching *check', tok);
+        return null;
+
+      case 'success':
+      case 'failure':
+        this.addError(`*${name} outside of a *check block`, tok);
+        return null;
+
+      case 'endonce':
+        this.addError('*endonce without matching *once', tok);
+        return null;
+
+      case 'endswitch':
+        this.addError('*endswitch without matching *switch', tok);
+        return null;
+
+      case 'case':
+      case 'default':
+        this.addError(`*${name} outside of a *switch block`, tok);
+        return null;
+
+      // ── Phase 6d: Delay ───────────────────────────────────────────────────
+      case 'delay': {
+        const secs = parseFloat(rest.trim());
+        if (isNaN(secs) || secs < 0) { this.addError('*delay requires a non-negative number of seconds', tok); return null; }
+        return { kind: IR.DELAY, seconds: Math.min(secs, 30), ...this.loc(tok) };
+      }
+
+      // ── Phase 6e: NPC / Dialogue ──────────────────────────────────────────
+      case 'npc': {
+        const m = rest.trim().match(/^(\w+)\s*(.*)$/);
+        if (!m) { this.addError('*npc requires: *npc id {"name":"...","color":"..."}', tok); return null; }
+        const id = m[1], raw = m[2].trim();
+        let schema = { name: id, color: '#888' };
+        if (raw) {
+          try { schema = Object.assign(schema, JSON.parse(raw)); }
+          catch { this.addError('*npc: JSON schema is invalid', tok); return null; }
+        }
+        if (this.file !== this.startupFile) { this.addError(`*npc '${id}' must be declared in ${this.startupFile}`, tok); return null; }
+        return { kind: IR.NPC, id, schema, ...this.loc(tok) };
+      }
+
+      case 'dialogue': return this.parseDialogue(tok, rest);
+      case 'enddialogue':
+        this.addError('*enddialogue without matching *dialogue', tok);
+        return null;
+
+      // ── Phase 6f: Clue / Discover / Resolve ──────────────────────────────
+      case 'clue': {
+        const m = rest.trim().match(/^(\w+)\s*(.*)$/);
+        if (!m) { this.addError('*clue requires: *clue id {"title":"...","text":"...","category":"..."}', tok); return null; }
+        const id = m[1], raw = m[2].trim();
+        let schema = { title: id, text: '', category: 'General' };
+        if (raw) {
+          try { schema = Object.assign(schema, JSON.parse(raw)); }
+          catch { this.addError('*clue: JSON schema is invalid', tok); return null; }
+        }
+        if (this.file !== this.startupFile) { this.addError(`*clue '${id}' must be declared in ${this.startupFile}`, tok); return null; }
+        return { kind: IR.CLUE, id, schema, ...this.loc(tok) };
+      }
+
+      case 'discover': {
+        const id = rest.trim();
+        if (!id) { this.addError('*discover requires a clue id', tok); return null; }
+        return { kind: IR.DISCOVER, id, ...this.loc(tok) };
+      }
+
+      case 'resolve': {
+        const id = rest.trim();
+        if (!id) { this.addError('*resolve requires a clue id', tok); return null; }
+        return { kind: IR.RESOLVE, id, ...this.loc(tok) };
+      }
+
+      // ── Phase 6g: Transition ──────────────────────────────────────────────
+      case 'transition': {
+        const PRESETS = ['fade', 'slideLeft', 'slideRight', 'dissolve'];
+        const m = rest.trim().match(/^(\w+)(?:\s+duration=(\d+(?:\.\d+)?))?$/);
+        if (!m) { this.addError('*transition requires: *transition <preset> [duration=N]', tok); return null; }
+        if (!PRESETS.includes(m[1])) { this.addError(`*transition: unknown preset '${m[1]}'. Use: ${PRESETS.join(', ')}`, tok); return null; }
+        return { kind: IR.TRANSITION, preset: m[1], duration: m[2] ? parseFloat(m[2]) : 0.5, ...this.loc(tok) };
+      }
 
       default:
         this.addError(`Unknown command: *${name}`, tok);
@@ -2893,7 +3417,8 @@ class Parser {
 
       if (tok.type === 'text') {
         this.consume();
-        nodes.push({ kind: IR.TEXT, value: tok.payload, ...this.loc(tok) });
+        // Phase 5d: inline [if ...][else][endif] in choice body text
+        for (const n of this.parseInlineConditionals(tok)) nodes.push(n);
         continue;
       }
 
@@ -2920,6 +3445,244 @@ class Parser {
     }
 
     return nodes;
+  }
+
+  // ── Phase 5d: Inline [if expr] ... [else] ... [endif] ───────────────────
+  // Parses a TEXT token that may contain inline conditional markers.
+  // Returns an array of IR nodes (TEXT and IF trees).
+  //
+  // Example:
+  //   "You [if has_map]check the map and[endif] take the fork."
+  // Produces:
+  //   TEXT "You "
+  //   IF { condition: "has_map", consequent: [TEXT "check the map and"], alternate: null }
+  //   TEXT " take the fork."
+
+  parseInlineConditionals(tok) {
+    const raw = tok.payload;
+    const loc = this.loc(tok);
+
+    // Fast path — no inline markers
+    if (!/\[if\s/i.test(raw)) {
+      return [{ kind: IR.TEXT, value: raw, ...loc }];
+    }
+
+    // Tokenise the text into literal segments and markers
+    const parts = [];
+    const markerRe = /\[if\s+([^\]]+)\]|\[else\]|\[endif\]/gi;
+    let pos = 0;
+    let m;
+    while ((m = markerRe.exec(raw)) !== null) {
+      if (m.index > pos) parts.push({ type: 'text', value: raw.slice(pos, m.index) });
+      if (m[1] !== undefined)         parts.push({ type: 'if',    cond: m[1].trim() });
+      else if (/\[else\]/i.test(m[0])) parts.push({ type: 'else' });
+      else                              parts.push({ type: 'endif' });
+      pos = m.index + m[0].length;
+    }
+    if (pos < raw.length) parts.push({ type: 'text', value: raw.slice(pos) });
+
+    // Build IR tree from parts using a recursion stack.
+    // Stack entries: arrays that are the current "active body" being filled.
+    const result = [];
+    const stack  = [result];  // stack[0] is the top-level output
+
+    for (const part of parts) {
+      const current = stack[stack.length - 1];
+
+      if (part.type === 'text') {
+        if (part.value) current.push({ kind: IR.TEXT, value: part.value, ...loc });
+
+      } else if (part.type === 'if') {
+        const ifNode = {
+          kind: IR.IF, condition: part.cond,
+          consequent: [], elseifClauses: [], alternate: null, ...loc,
+        };
+        current.push(ifNode);
+        stack.push(ifNode.consequent);  // fill consequent next
+
+      } else if (part.type === 'else') {
+        if (stack.length < 2) { this.addError('Inline [else] without matching [if]', tok); continue; }
+        stack.pop();  // done filling consequent (or previous else)
+        // Find the enclosing IF node in the parent body
+        const parent = stack[stack.length - 1];
+        const ifNode = parent[parent.length - 1];
+        if (!ifNode || ifNode.kind !== IR.IF) {
+          this.addError('Inline [else] cannot be matched to an [if]', tok); continue;
+        }
+        ifNode.alternate = [];
+        stack.push(ifNode.alternate);  // fill alternate next
+
+      } else {  // endif
+        if (stack.length < 2) { this.addError('Inline [endif] without matching [if]', tok); continue; }
+        stack.pop();
+      }
+    }
+
+    if (stack.length > 1) this.addError('Unclosed inline [if] in text line', tok);
+    return result;
+  }
+
+  // ── Phase 5c: Check / success / failure / endcheck ───────────────────────
+  // *check skillId [difficulty=N]
+  //     *success
+  //         ... success body ...
+  //     *failure
+  //         ... failure body ...
+  // *endcheck
+  //
+  // difficulty defaults to 0 if omitted.
+
+  parseCheck(tok, rest) {
+    const m = rest.trim().match(/^(\S+)(?:\s+difficulty=(\S+))?$/i);
+    if (!m) {
+      this.addError('*check: expected *check skillId [difficulty=N]', tok);
+      return null;
+    }
+
+    const node = {
+      kind:        IR.CHECK,
+      skillId:     m[1],
+      difficulty:  m[2] ?? '0',
+      successBody: [],
+      failureBody: [],
+      ...this.loc(tok),
+    };
+
+    // Discard any text before *success (shouldn't be any, but be safe)
+    this.parseNodes(new Set(['success', 'failure', 'endcheck']));
+
+    if (!this.atEnd() && this.peekCmdName() === 'success') {
+      this.consume();
+      node.successBody = this.parseNodes(new Set(['failure', 'endcheck']));
+    } else {
+      this.addWarning('*check block has no *success section', tok);
+    }
+
+    if (!this.atEnd() && this.peekCmdName() === 'failure') {
+      this.consume();
+      node.failureBody = this.parseNodes(new Set(['endcheck']));
+    } else {
+      this.addWarning('*check block has no *failure section', tok);
+    }
+
+    if (!this.atEnd() && this.peekCmdName() === 'endcheck') {
+      this.consume();
+    } else {
+      this.addError('Missing *endcheck', tok);
+    }
+
+    return node;
+  }
+
+  // ── Phase 6b: Once / endonce ──────────────────────────────────────────────
+  // *once <id>
+  //     ... body executed only the first time ...
+  // *endonce
+
+  parseOnce(tok, rest) {
+    const id = rest.trim();
+    if (!id || !/^\w+$/.test(id)) {
+      this.addError('*once requires a valid identifier (letters, digits, underscores)', tok);
+      return null;
+    }
+
+    const node = {
+      kind: IR.ONCE,
+      id,
+      body: [],
+      ...this.loc(tok),
+    };
+
+    node.body = this.parseNodes(new Set(['endonce']));
+
+    if (!this.atEnd() && this.peekCmdName() === 'endonce') {
+      this.consume();
+    } else {
+      this.addError('Missing *endonce', tok);
+    }
+
+    return node;
+  }
+
+  // ── Phase 6c: Switch / case / default / endswitch ────────────────────────
+  // *switch expr
+  //     *case "value"
+  //         ... body ...
+  //     *default
+  //         ... body ...
+  // *endswitch
+
+  parseSwitch(tok, rest) {
+    const expr = rest.trim();
+    if (!expr) { this.addError('*switch requires an expression', tok); return null; }
+
+    const node = {
+      kind:        IR.SWITCH,
+      expr,
+      cases:       [],   // [{ value, body[] }]
+      defaultBody: null,
+      ...this.loc(tok),
+    };
+
+    // Collect *case / *default blocks
+    while (!this.atEnd()) {
+      const next = this.peek();
+
+      // Skip blank lines
+      if (next.type === 'blank') { this.consume(); continue; }
+
+      if (next.type !== 'command') { this.consume(); continue; }
+      const { name: cname, rest: crest } = this.parseCmd(next.payload);
+
+      if (cname === 'case') {
+        this.consume();
+        const valStr = crest.trim();
+        let caseVal;
+        if      ((valStr.startsWith('"') && valStr.endsWith('"')) || (valStr.startsWith("'") && valStr.endsWith("'"))) caseVal = valStr.slice(1, -1);
+        else if (valStr === 'true')    caseVal = true;
+        else if (valStr === 'false')   caseVal = false;
+        else if (!isNaN(Number(valStr))) caseVal = Number(valStr);
+        else {
+          this.addError(`*case value must be a string literal, number, or boolean — got "${valStr}"`, next);
+          caseVal = valStr;
+        }
+        const body = this.parseNodes(new Set(['case', 'default', 'endswitch']));
+        node.cases.push({ value: caseVal, body, ...this.loc(next) });
+        continue;
+      }
+
+      if (cname === 'default') {
+        this.consume();
+        node.defaultBody = this.parseNodes(new Set(['endswitch']));
+        if (!this.atEnd() && this.peekCmdName() === 'endswitch') this.consume();
+        else this.addError('Missing *endswitch after *default', tok);
+        return node;
+      }
+
+      if (cname === 'endswitch') {
+        this.consume();
+        return node;
+      }
+
+      // Unexpected
+      this.consume();
+      this.addError(`Unexpected *${cname} inside *switch block`, next);
+    }
+
+    this.addError('Missing *endswitch', tok);
+    return node;
+  }
+
+  // ── Phase 6e: Dialogue ────────────────────────────────────────────────────
+  parseDialogue(tok, rest) {
+    const m = rest.trim().match(/^(\w+)(?:\s+mood="([^"]*)")?$/);
+    if (!m) { this.addError('*dialogue requires: *dialogue npcId [mood="..."]', tok); return null; }
+    const npcId = m[1], mood = m[2] ?? null;
+    const node = { kind: IR.DIALOGUE, npcId, mood, body: [], ...this.loc(tok) };
+    node.body = this.parseNodes(new Set(['enddialogue']));
+    if (!this.atEnd() && this.peekCmdName() === 'enddialogue') this.consume();
+    else this.addError('Missing *enddialogue', tok);
+    return node;
   }
 }
 
@@ -3149,7 +3912,13 @@ class Engine {
       undoStackDepth: config.undoStackDepth ?? 50,
       loopCap:        config.loopCap        ?? 100000,
       startupFile:    config.startupFile    ?? 'startup.txt',
+      allowSave:      config.allowSave      !== false,
+      previewMode:    config.previewMode    ?? false,
     };
+    // Share config with renderer so it can adjust transitions/delays
+    if (this.renderer && typeof this.renderer === 'object') {
+      this.renderer.config = this.config;
+    }
     this.state    = new StoryState();
     this.programs = new Map();   // filename → compiled program (cache)
     this.program  = [];          // current program array
@@ -3271,7 +4040,16 @@ class Engine {
       // appends a decorative divider without clearing.
       case OP.NEW_PAGE: {
         this._save();
-        this.renderer.clearScreen();
+        // Apply pending transition if any
+        if (this.state.pendingTransition) {
+          const t = this.state.pendingTransition;
+          this.state.pendingTransition = null;
+          this.renderer.applyTransition(t.preset, t.duration, () => {
+            this.renderer.clearScreen();
+          });
+        } else {
+          this.renderer.clearScreen();
+        }
         break;
       }
 
@@ -3460,13 +4238,26 @@ class Engine {
         this.state.clearTemps();
         this.state.loopCounters.clear();
         this.waiting = true;
-        this._loadProgram(instr.file).then(() => {
-          this.program     = this.programs.get(instr.file);
-          this.state.scene = instr.file;
-          this.state.ip    = 0;
-          this.waiting     = false;
-          this._run();
-        }).catch(e => this.renderer.showError(e.message));
+        const doLoad = () => {
+          this._loadProgram(instr.file).then(() => {
+            this.program     = this.programs.get(instr.file);
+            this.state.scene = instr.file;
+            this.state.ip    = 0;
+            this.waiting     = false;
+            this._run();
+          }).catch(e => this.renderer.showError(e.message));
+        };
+        // Apply pending transition if any
+        if (this.state.pendingTransition) {
+          const t = this.state.pendingTransition;
+          this.state.pendingTransition = null;
+          this.renderer.applyTransition(t.preset, t.duration, () => {
+            this.renderer.clearScreen();
+            doLoad();
+          });
+        } else {
+          doLoad();
+        }
         break;
       }
 
@@ -3679,6 +4470,120 @@ class Engine {
         }
         break;
       }
+
+      // ── Phase 5c: Skill check roll ─────────────────────────────────────────
+      // Rolls 1–100. success = roll <= (skillValue + difficulty).
+      // Shows a card in the story output, then falls through (success) or
+      // jumps to failTarget (failure).
+      case OP.CHECK_ROLL: {
+        let skillVal = 50;  // safe default if skill not found
+        try { skillVal = Number(this.state.get(instr.skillId)) || 0; } catch(e) {}
+        let diff = 0;
+        try { diff = Number(evaluate(instr.difficulty, this.state)) || 0; } catch(e) {}
+        const roll      = Math.floor(Math.random() * 100) + 1;
+        const threshold = Math.max(1, Math.min(99, skillVal + diff));
+        const success   = roll <= threshold;
+        this.renderer.showCheckResult(instr.skillId, roll, threshold, success);
+        if (!success) this.state.ip = instr.failTarget;
+        break;
+      }
+
+      // ── Phase 5g: Chapter metadata — no runtime effect ─────────────────────
+      case OP.CHAPTER: { break; }
+
+      // ── Phase 6a: Flags ─────────────────────────────────────────────────────
+      case OP.FLAG: {
+        // Declare a boolean flag global (idempotent — startup may run twice in preview)
+        this.state.flagRegistry.add(instr.id);
+        if (!this.state.globals.has(instr.id)) {
+          this.state.createGlobal(instr.id, false);
+        }
+        break;
+      }
+
+      case OP.RAISE: {
+        if (this.state.globals.has(instr.id))      this.state.globals.set(instr.id, true);
+        else if (this.state.temps.has(instr.id))   this.state.temps.set(instr.id, true);
+        else throw new RuntimeError(`*raise: '${instr.id}' is not a declared variable or flag`, this.state.scene, this.state.ip);
+        break;
+      }
+
+      case OP.LOWER: {
+        if (this.state.globals.has(instr.id))      this.state.globals.set(instr.id, false);
+        else if (this.state.temps.has(instr.id))   this.state.temps.set(instr.id, false);
+        else throw new RuntimeError(`*lower: '${instr.id}' is not a declared variable or flag`, this.state.scene, this.state.ip);
+        break;
+      }
+
+      // ── Phase 6b: Once ─────────────────────────────────────────────────────
+      case OP.ONCE: {
+        if (this.state.seenOnce.has(instr.id)) this.state.ip = instr.skipTarget;
+        break;
+      }
+
+      case OP.ENDONCE: {
+        this.state.seenOnce.add(instr.id);
+        this._save();  // persist seenOnce immediately so it survives page reload
+        break;
+      }
+
+      // ── Phase 6d: Delay ───────────────────────────────────────────────────
+      case OP.DELAY: {
+        const ms = this.config.previewMode
+          ? Math.min(instr.seconds * 1000, 100)  // clamp to 100ms in preview
+          : instr.seconds * 1000;
+        this.waiting = true;
+        setTimeout(() => { this.waiting = false; this._run(); }, ms);
+        return; // return early — _run resumes after timeout
+      }
+
+      // ── Phase 6e: NPC / Dialogue ──────────────────────────────────────────
+      case OP.NPC: {
+        this.state.npcRegistry.set(instr.id, instr.schema);
+        break;
+      }
+
+      case OP.DIALOGUE_START: {
+        const npc = this.state.npcRegistry.get(instr.npcId) ?? { name: instr.npcId, color: '#888' };
+        this.renderer.renderDialogueStart(npc, instr.mood);
+        break;
+      }
+
+      case OP.DIALOGUE_END: {
+        this.renderer.renderDialogueEnd();
+        break;
+      }
+
+      // ── Phase 6f: Clue / Discover / Resolve ──────────────────────────────
+      case OP.CLUE: {
+        this.state.clueRegistry.set(instr.id, instr.schema);
+        break;
+      }
+
+      case OP.DISCOVER: {
+        if (!this.state.clueRegistry.has(instr.id)) {
+          console.warn(`[StoryScript] *discover: clue '${instr.id}' not declared`);
+        } else if (!this.state.discoveredClues.has(instr.id)) {
+          this.state.discoveredClues.add(instr.id);
+          const clue = this.state.clueRegistry.get(instr.id);
+          this.renderer.renderDiscoverToast(clue);
+          this._save();
+        }
+        break;
+      }
+
+      case OP.RESOLVE: {
+        this.state.resolvedClues.add(instr.id);
+        this._save();
+        break;
+      }
+
+      // ── Phase 6g: Transition ──────────────────────────────────────────────
+      case OP.TRANSITION: {
+        this.state.pendingTransition = { preset: instr.preset, duration: instr.duration };
+        break;
+      }
+
         throw new RuntimeError(`Unknown opcode: ${instr.op}`, this.state.scene, this.state.ip);
     }
   }
@@ -4255,6 +5160,25 @@ body {
 .ss-ach-title { font-weight: 700; }
 .ss-ach-desc { font-size: 12px; opacity: 0.65; }
 
+/* ── Skill Check Card ── */
+.ss-check-card {
+  display: flex; align-items: center; gap: 10px;
+  margin: 1.2em 0; padding: 11px 16px; border-radius: 6px;
+  font-size: 13px; font-family: Georgia, serif;
+  border-left: 4px solid;
+}
+.ss-check-success {
+  background: rgba(60,120,60,0.10); border-color: #4a8a4a; color: var(--text);
+}
+.ss-check-failure {
+  background: rgba(140,50,50,0.10); border-color: #8a4a4a; color: var(--text);
+}
+.ss-check-icon { font-size: 16px; flex-shrink: 0; }
+.ss-check-success .ss-check-icon { color: #3a7a3a; }
+.ss-check-failure .ss-check-icon { color: #7a3a3a; }
+.ss-check-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
+.ss-check-detail { opacity: 0.7; font-size: 12px; }
+
 /* ── Toast ── */
 .ss-toast {
   position: fixed; bottom: 28px; right: 28px;
@@ -4265,6 +5189,61 @@ body {
   animation: toastIn 0.3s ease; z-index: 400;
 }
 @keyframes toastIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* ── Phase 6e: Dialogue ── */
+.ss-dialogue {
+  border-left: 3px solid var(--npc-color, #888);
+  padding-left: 14px;
+  margin: 10px 0 10px 0;
+}
+.ss-dialogue-speaker {
+  font-weight: bold;
+  font-size: 0.88em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 3px;
+  color: var(--npc-color, #888);
+  opacity: 0.85;
+}
+.ss-dialogue-mood {
+  font-style: italic;
+  font-size: 0.85em;
+  font-weight: normal;
+  opacity: 0.7;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ── Phase 6f: Clue discovery toast ── */
+.ss-discover-toast {
+  display: flex; align-items: center; gap: 8px;
+  background: #faf6ec; border: 1px solid #bda96e;
+  border-radius: 8px; padding: 9px 15px;
+  font-size: 13px; font-family: Georgia, serif;
+  box-shadow: 0 4px 12px rgba(44,36,22,0.12);
+  animation: toastIn 0.3s ease;
+  margin: 10px 0;
+  opacity: 1; transition: opacity 0.6s ease;
+}
+.ss-discover-toast.ss-discover-toast-hide { opacity: 0; }
+.ss-discover-icon { font-size: 1.1em; }
+
+/* ── Phase 6g: Transitions ── */
+.ss-transition-out-fade { opacity: 0; transition: opacity var(--t-dur, 0.5s) ease; }
+@keyframes ss-fadein { from { opacity: 0; } to { opacity: 1; } }
+.ss-transition-in-fade { animation: ss-fadein var(--t-dur, 0.5s) ease forwards; }
+
+.ss-transition-out-slideLeft { transform: translateX(-100%); transition: transform var(--t-dur, 0.5s) ease; }
+@keyframes ss-slideinright { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.ss-transition-in-slideLeft { animation: ss-slideinright var(--t-dur, 0.5s) ease forwards; }
+
+.ss-transition-out-slideRight { transform: translateX(100%); transition: transform var(--t-dur, 0.5s) ease; }
+@keyframes ss-slideinleft { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+.ss-transition-in-slideRight { animation: ss-slideinleft var(--t-dur, 0.5s) ease forwards; }
+
+.ss-transition-out-dissolve { opacity: 0; filter: blur(4px); transition: opacity var(--t-dur, 0.5s) ease, filter var(--t-dur, 0.5s) ease; }
+@keyframes ss-dissolvein { from { opacity: 0; filter: blur(4px); } to { opacity: 1; filter: blur(0); } }
+.ss-transition-in-dissolve { animation: ss-dissolvein var(--t-dur, 0.5s) ease forwards; }
 
 #storyscript-ui { margin-top: 1em; }
 
@@ -4326,6 +5305,20 @@ body {
   transition: background 0.12s, border-color 0.12s;
 }
 .ss-menu-btn:hover { background: #5C3D0E; color: #FFF8EE; border-color: #5C3D0E; }
+
+/* ── Phase 6f: Journal CSS ── */
+.ss-journal-cat {
+  font-size: 11px; font-weight: bold; letter-spacing: 0.08em;
+  text-transform: uppercase; color: #8a7145; margin: 14px 0 6px 0;
+  border-bottom: 1px solid #e0d4b0; padding-bottom: 4px;
+}
+.ss-journal-entry {
+  background: #faf6ec; border: 1px solid #ddd0a8; border-radius: 5px;
+  padding: 10px 13px; margin: 6px 0;
+}
+.ss-journal-resolved { opacity: 0.6; }
+.ss-journal-title { font-weight: bold; font-size: 14px; margin-bottom: 4px; }
+.ss-journal-text { font-size: 13px; line-height: 1.6; color: #4a3f2f; }
 </style>
 </head>
 <body>
@@ -4336,6 +5329,7 @@ body {
   <button class="ss-topbar-btn" onclick="ssOpenOverlay('stats')">Stats</button>
   <button class="ss-topbar-btn" onclick="ssOpenOverlay('inventory')">Inventory</button>
   <button class="ss-topbar-btn" onclick="ssOpenOverlay('achievements')">Achievements</button>
+  <button class="ss-topbar-btn" onclick="ssOpenOverlay('journal')">Journal</button>
   <button class="ss-topbar-btn" onclick="ssOpenOverlay('menu')">Menu</button>
 </div>
 
@@ -4419,7 +5413,7 @@ var _engine = null;
 
   var engine = new SS.Engine(renderer, function(name) {
     return Promise.resolve(_files[name] || _files[name+'.txt'] || '');
-  }, { startupFile: _start, loopCap: ` + loopCap + `, undoStackDepth: 50, allowSave: false });
+  }, { startupFile: _start, loopCap: ` + loopCap + `, undoStackDepth: 50, allowSave: false, previewMode: true });
 
   _engine = engine;
   engine.start(false);
@@ -4566,6 +5560,38 @@ function ssOpenOverlay(panel) {
     restartBtn.textContent = 'Restart Story';
     restartBtn.onclick = function() { ssCloseOverlay(); if (_engine) _engine.restart(); };
     content.appendChild(restartBtn);
+
+  } else if (panel === 'journal') {
+    content.appendChild(ssOverlayHeader('Journal'));
+    var hasClues = _engine && _engine.state.discoveredClues && _engine.state.discoveredClues.size > 0;
+    if (!hasClues) {
+      content.appendChild(ssEmpty('No journal entries yet.'));
+    } else {
+      // Group by category
+      var byCategory = {};
+      _engine.state.discoveredClues.forEach(function(id) {
+        var schema = (_engine.state.clueRegistry && _engine.state.clueRegistry.get(id)) || { title: id, text: '', category: 'General' };
+        var cat = schema.category || 'General';
+        if (!byCategory[cat]) byCategory[cat] = [];
+        byCategory[cat].push({ id: id, schema: schema });
+      });
+      Object.keys(byCategory).sort().forEach(function(cat) {
+        var catHdr = document.createElement('div'); catHdr.className = 'ss-journal-cat';
+        catHdr.textContent = cat; content.appendChild(catHdr);
+        byCategory[cat].forEach(function(entry) {
+          var resolved = _engine.state.resolvedClues && _engine.state.resolvedClues.has(entry.id);
+          var card = document.createElement('div'); card.className = 'ss-journal-entry' + (resolved ? ' ss-journal-resolved' : '');
+          var title = document.createElement('div'); title.className = 'ss-journal-title';
+          title.textContent = (resolved ? '✓ ' : '') + (entry.schema.title || entry.id);
+          card.appendChild(title);
+          if (entry.schema.text) {
+            var text = document.createElement('div'); text.className = 'ss-journal-text';
+            text.textContent = entry.schema.text; card.appendChild(text);
+          }
+          content.appendChild(card);
+        });
+      });
+    }
   }
 
   document.getElementById('ss-overlay').classList.add('open');
@@ -5195,6 +6221,86 @@ function renderOutline(symbolTable, fileName) {
   addP3Section(achMap,   'Achievements', 'type-ach',   '[A]');
   addP3Section(titleMap, 'Titles',       'type-title', '[T]');
 
+  // Phase 6a: Flags
+  const flagSet = symbolTable.flags ?? new Set();
+  if (flagSet.size > 0) {
+    const sec = document.createElement('div');
+    sec.className = 'outline-section';
+    sec.textContent = 'Flags';
+    list.appendChild(sec);
+    for (const id of [...flagSet].sort()) {
+      const item = document.createElement('div');
+      item.className = 'outline-item type-flag';
+      item.textContent = '🚩 ' + id;
+      item.title = 'Flag — ' + id;
+      list.appendChild(item);
+      hasItems = true;
+    }
+  }
+
+  // Phase 6e: NPCs
+  const npcMap = symbolTable.npcs ?? new Map();
+  if (npcMap.size > 0) {
+    const sec = document.createElement('div');
+    sec.className = 'outline-section';
+    sec.textContent = 'NPCs';
+    list.appendChild(sec);
+    for (const [id, info] of npcMap) {
+      const item = document.createElement('div');
+      item.className = 'outline-item type-npc';
+      item.textContent = '👤 ' + (info.schema?.name || id);
+      item.title = 'NPC — line ' + (info.lineNum || '?');
+      item.addEventListener('click', () => {
+        if (info.file && info.file !== activeFile) openTab(info.file);
+        jumpToLine(info.lineNum || 0);
+      });
+      list.appendChild(item);
+      hasItems = true;
+    }
+  }
+
+  // Phase 6f: Clues
+  const clueMap = symbolTable.clues ?? new Map();
+  if (clueMap.size > 0) {
+    const sec = document.createElement('div');
+    sec.className = 'outline-section';
+    sec.textContent = 'Clues';
+    list.appendChild(sec);
+    for (const [id, info] of clueMap) {
+      const item = document.createElement('div');
+      item.className = 'outline-item type-clue';
+      item.textContent = '📋 ' + (info.schema?.title || id);
+      item.title = 'Clue — line ' + (info.lineNum || '?');
+      item.addEventListener('click', () => {
+        if (info.file && info.file !== activeFile) openTab(info.file);
+        jumpToLine(info.lineNum || 0);
+      });
+      list.appendChild(item);
+      hasItems = true;
+    }
+  }
+
+  // Phase 5g: Chapters
+  const chapterMap = symbolTable.chapters ?? new Map();
+  if (chapterMap.size > 0) {
+    const sec = document.createElement('div');
+    sec.className = 'outline-section';
+    sec.textContent = 'Chapters';
+    list.appendChild(sec);
+    for (const [id, info] of chapterMap) {
+      const item = document.createElement('div');
+      item.className = 'outline-item type-chapter';
+      item.textContent = (info.icon ? info.icon + ' ' : '📖 ') + info.title;
+      item.title = 'Chapter — line ' + (info.lineNum || '?');
+      item.addEventListener('click', () => {
+        if (info.file && info.file !== activeFile) openTab(info.file);
+        jumpToLine(info.lineNum || 0);
+      });
+      list.appendChild(item);
+      hasItems = true;
+    }
+  }
+
   if (!hasItems) {
     list.innerHTML = '<div class="outline-item" style="color:var(--text-dim);font-family:var(--font-ui);font-size:11px;padding:12px;">No symbols in this file.</div>';
   }
@@ -5403,6 +6509,22 @@ function ssCompletionSource(context) {
         'give','take','show_achievements','unlock',
         'grant','revoke','show_title',
         'random','input_text','input_number',
+        // Phase 5c/5g
+        'check','success','failure','endcheck','chapter',
+        // Phase 6a
+        'flag','raise','lower',
+        // Phase 6b
+        'once','endonce',
+        // Phase 6c
+        'switch','case','default','endswitch',
+        // Phase 6d
+        'delay',
+        // Phase 6e
+        'npc','dialogue','enddialogue',
+        // Phase 6f
+        'clue','discover','resolve',
+        // Phase 6g
+        'transition',
       ];
       const options = commands
         .filter(c => c.startsWith(partial))
