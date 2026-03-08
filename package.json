@@ -16,10 +16,12 @@
     "./evaluator":   "./src/evaluator.js"
   },
   "scripts": {
-    "test":  "node test/run_tests.js && node test/phase1_tests.js",
-    "fuzz":  "node fuzz.js --runs 100",
-    "lint":  "node lint.js",
-    "build": "node build.js"
+    "build:ts": "tsc",
+    "build:ts:watch": "tsc --watch",
+    "bundle":    "node make_bundle.js",
+    "build":     "npm run build:ts && node build.js",
+    "test":      "npm run build:ts && node dist/run_tests.js && node dist/phase1_tests.js",
+    "lint":      "npm run build:ts && node dist/lint.js"
   },
   "engines": {
     "node": ">=16"
