@@ -1,30 +1,22 @@
 {
-  "name": "storyscript",
-  "version": "0.4.0",
-  "description": "StoryScript interactive fiction engine and IDE",
-  "main": "src/compiler.js",
-  "exports": {
-    ".":             "./src/compiler.js",
-    "./compiler":    "./src/compiler.js",
-    "./lexer":       "./src/lexer.js",
-    "./parser":      "./src/parser.js",
-    "./emitter":     "./src/emitter.js",
-    "./ir":          "./src/ir.js",
-    "./engine":      "./src/engine.js",
-    "./renderer":    "./src/renderer.js",
-    "./state":       "./src/state.js",
-    "./evaluator":   "./src/evaluator.js"
-  },
+  "name": "storyscript-ide",
+  "version": "0.6.0",
+  "private": true,
   "scripts": {
-    "build:ts": "tsc",
-    "build:ts:watch": "tsc --watch",
-    "bundle":    "node make_bundle.js",
-    "build":     "npm run build:ts && node build.js",
-    "test":      "npm run build:ts && node dist/run_tests.js && node dist/phase1_tests.js",
-    "lint":      "npm run build:ts && node dist/lint.js"
+    "dev":     "vite",
+    "build":   "vite build",
+    "preview": "vite preview"
   },
-  "engines": {
-    "node": ">=16"
+  "devDependencies": {
+    "vite": "^5.0.0"
   },
-  "license": "MIT"
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.18.6",
+    "@codemirror/commands":     "^6.8.0",
+    "@codemirror/language":     "^6.11.0",
+    "@codemirror/lint":         "^6.8.4",
+    "@codemirror/state":        "^6.5.2",
+    "@codemirror/view":         "^6.35.3",
+    "@lezer/highlight":         "^1.2.1"
+  }
 }
