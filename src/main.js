@@ -48,6 +48,7 @@ import {
   bracketMatching,
   HighlightStyle,
   syntaxHighlighting,
+  indentUnit,
 } from '@codemirror/language';
 
 import { Tag } from '@lezer/highlight';
@@ -91,6 +92,7 @@ window._CM = {
   bracketMatching,
   HighlightStyle,
   syntaxHighlighting,
+  indentUnit,
   Tag,
   // lint
   linter,
