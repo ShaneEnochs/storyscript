@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StoryScript IDE</title>
+
+<!--
+  CSS is extracted from the monolithic index.html into src/ide.css.
+  Vite processes this file and inlines/hashes it in production.
+-->
+
+<!--
+  main.js: imports CM6 from npm (no CDN), fetches engine IIFE, exposes on window.
+  ide-core.js: all IDE application logic (project state, tabs, preview, compile, CM6 init).
+
+  Both are type="module" — they are ES modules bundled by Vite.
+  Loading order: main.js evaluates first (listed first), then ide-core.js.
+  main.js sets window._CM synchronously and window._ssReady as a Promise.
+  ide-core.js awaits window._ssReady before initialising CM6 or calling SS.
+-->
+  <script type="module" crossorigin src="/storyscript/assets/index-CdvLpqH_.js"></script>
+  <link rel="stylesheet" crossorigin href="/storyscript/assets/index-DHJwMNGh.css">
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="logo">Story<span>Script</span>&thinsp;<span style="font-size:10px;color:var(--text-dim);">IDE</span></div>
+  <div class="sep"></div>
+  <button class="tb-btn" onclick="newProject()">New Project</button>
+  <button class="tb-btn" onclick="newFile()">+ File</button>
+  <div class="sep"></div>
+  <button class="tb-btn" onclick="openProjectLibrary()">Open Project</button>
+  <button class="tb-btn" onclick="saveProjectAs()">Save As</button>
+  <div class="sep"></div>
+  <button class="tb-btn" onclick="exportProject()">Export JSON</button>
+  <button class="tb-btn" onclick="importProject()">Import JSON</button>
+  <button class="tb-btn" onclick="exportHTML()">Export HTML</button>
+  <div class="sep"></div>
+  <div class="spacer"></div>
+  <span id="status-badge" class="status-badge ok">OK</span>
+</div>
+
+<div id="layout">
+  <div id="sidebar">
+    <div class="sidebar-hdr">
+      <span>Files</span>
+      <button title="New file (or Cmd+P to open)" onclick="newFile()">+</button>
+    </div>
+    <div id="file-list"></div>
+    <div id="sidebar-bottom">
+      <input class="proj-input" id="project-title" type="text" placeholder="Project title…">
+    </div>
+  </div>
+
+  <div id="outline-pane">
+    <div class="outline-hdr">
+      <span>Outline</span>
+      <button onclick="toggleOutline()" title="Collapse outline">&lt;</button>
+    </div>
+    <div id="outline-list"><div class="outline-item" style="color:var(--text-dim);font-family:var(--font-ui);font-size:11px;padding:12px;">Open a file to see its symbols.</div></div>
+  </div>
+
+  <div id="editor-pane">
+    <div id="editor-tabs"></div>
+    <div id="editor-wrapper">
+      <div id="editor-area"></div>
+    </div>
+    <div id="console-pane">
+      <div class="con-hdr">
+        <span>Output</span>
+        <span id="console-count" class="c-info" style="flex:1"></span>
+        <button class="tb-btn" onclick="clearConsole()" style="padding:2px 6px;font-size:10px;">Clear</button>
+      </div>
+      <div id="console-output"></div>
+    </div>
+  </div>
+
+  <div id="resizer"></div>
+
+  <div id="right-pane">
+    <div id="preview-section">
+      <div class="prev-toolbar">
+        <span id="preview-scene" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Preview</span>
+        <button class="tb-btn" onclick="toggleOutlinePane()" title="Toggle symbol outline (Cmd+Shift+O)" style="font-size:11px;padding:3px 8px;">[Outline]</button>
+        <button class="tb-btn" onclick="toggleInspector()" id="insp-toggle-btn" style="padding:3px 8px;font-size:11px;" title="Toggle variable inspector">[Inspector]</button>
+        <button class="tb-btn" onclick="restartPreview()" style="padding:3px 8px;font-size:11px;">[Restart]</button>
+      </div>
+      <iframe id="preview-frame" sandbox="allow-scripts allow-same-origin"></iframe>
+    </div>
+
+    <div id="inspector-resize"></div>
+
+    <div id="inspector">
+      <div class="insp-hdr">
+        <span class="insp-title">Variables</span>
+        <span style="font-size:9px;color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0;" title="Double-click a scalar value to edit it live in the preview">dbl-click to edit</span>
+        <input class="insp-filter" id="insp-filter" type="text" placeholder="filter…" oninput="renderInspector()">
+      </div>
+      <div id="inspector-body"><div class="insp-empty">Run the preview to see variables</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Project Library Modal -->
+<div id="proj-library-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.25);z-index:999;align-items:center;justify-content:center;">
+  <div class="modal" style="max-width:520px;">
+    <h3>Project Library</h3>
+    <p>All your saved stories. Switching projects auto-saves your current one first.</p>
+    <div id="proj-library-body" style="max-height:300px;overflow-y:auto;margin-bottom:16px;"></div>
+    <div class="modal-btns">
+      <button class="tb-btn" onclick="closeProjectLibrary()">Close</button>
+      <button class="tb-btn primary" onclick="closeProjectLibrary();newProject();">+ New Story</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal (for New File / Save As) -->
+<div id="modal-bg">
+  <div class="modal">
+    <h3 id="modal-title">New File</h3>
+    <p id="modal-desc">Enter a filename for the new scene file.</p>
+    <input id="modal-input" type="text" placeholder="scene_name">
+    <div class="modal-btns">
+      <button class="tb-btn" onclick="closeModal()">Cancel</button>
+      <button class="tb-btn primary" id="modal-ok" onclick="confirmModal()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Quick File Open (Cmd+P) -->
+<div id="quickopen-bg">
+  <div id="quickopen-box">
+    <input id="quickopen-input" type="text" placeholder="Type a filename to open…" autocomplete="off" spellcheck="false">
+    <div id="quickopen-results"></div>
+  </div>
+</div>
+
+</body>
+</html>

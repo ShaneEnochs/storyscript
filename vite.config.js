@@ -4,6 +4,11 @@ export default defineConfig({
   root: '.',
   publicDir: 'public',   // storyscript-engine.js lives here; Vite copies to dist/
 
+  // Base path for GitHub Pages: repo is at /storyscript/
+  // Vite rewrites all asset URLs in the built HTML to include this prefix.
+  // Change to '/' if deploying to a root domain (e.g. your own server).
+  base: '/storyscript/',
+
   build: {
     outDir: 'dist',
     emptyOutDir: true,
