@@ -2030,7 +2030,7 @@ function initCodeMirror(CM) {
   const {
     EditorView, keymap, highlightActiveLine, lineNumbers, highlightActiveLineGutter,
     EditorState, defaultKeymap, history, historyKeymap, indentWithTab,
-    bracketMatching, Compartment,
+    bracketMatching, Compartment, indentUnit,
     lintGutter, completionKeymap, drawSelection, highlightSpecialChars,
   } = CM;
 
@@ -2048,6 +2048,8 @@ function initCodeMirror(CM) {
     history(),
     drawSelection(),
     EditorState.allowMultipleSelections.of(true),
+    EditorState.tabSize.of(4),       // display width of a tab character
+    indentUnit.of('\t'),             // Tab key inserts a real \t, not spaces
     highlightActiveLine(),
     bracketMatching(),
     ...ssHighlightExts,
