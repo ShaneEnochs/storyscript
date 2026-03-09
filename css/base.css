@@ -1,0 +1,40 @@
+/* base.css — CSS variables, resets, typography */
+
+:root {
+  --bg:        #0f0f13;
+  --surface:   #16161d;
+  --surface2:  #1e1e28;
+  --border:    #2a2a38;
+  --text:      #d4d4e8;
+  --muted:     #5a5a7a;
+  --accent:    #7c6af7;
+
+  --syn-cmd:     #f76a8a;
+  --syn-option:  #6ab8f7;
+  --syn-var:     #c47af7;
+  --syn-comment: #5a5a7a;
+  --syn-label:   #f7c46a;
+  --syn-string:  #7af7b8;
+
+  --err:  #f76a8a;
+  --warn: #f7c46a;
+  --info: #6ab8f7;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Syne', sans-serif;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}

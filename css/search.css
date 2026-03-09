@@ -1,0 +1,89 @@
+/* search.css — find & replace panel */
+
+#search-panel {
+  display: none;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 12px;
+  gap: 6px;
+  flex-direction: column;
+}
+#search-panel.open { display: flex; }
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+#search-panel input[type="text"] {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'Fira Code', monospace;
+  font-size: 12px;
+  padding: 3px 8px;
+  width: 200px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+#search-panel input[type="text"]:focus { border-color: var(--accent); }
+
+#search-panel button {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'Syne', sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+#search-panel button:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+#search-close {
+  background: none !important;
+  border: none !important;
+  color: var(--muted) !important;
+  font-size: 16px;
+  padding: 0 4px !important;
+  margin-left: auto;
+}
+#search-close:hover { color: var(--text) !important; background: none !important; }
+
+.search-status {
+  font-family: 'Fira Code', monospace;
+  font-size: 10px;
+  color: var(--muted);
+  min-width: 60px;
+}
+.search-status.no-match { color: var(--err); }
+
+.search-option {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.search-option input[type="checkbox"] { accent-color: var(--accent); }
+
+/* Search match highlights in editor */
+mark.search-match {
+  background: rgba(247, 196, 106, 0.25);
+  color: inherit;
+  border-radius: 2px;
+  outline: 1px solid rgba(247, 196, 106, 0.4);
+}
+mark.search-match.current {
+  background: rgba(247, 196, 106, 0.55);
+  outline: 1px solid rgba(247, 196, 106, 0.9);
+}
